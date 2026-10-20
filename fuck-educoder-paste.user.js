@@ -286,24 +286,37 @@
       return true;
     }
 
-    function insertEditor(route, text) {
+    function prepareNativePaste(el) {
+      if (lower(el?.tagName) !== "textarea" || el.disabled || el.readOnly ||
+          typeof el.selectionStart !== "number") return;
+      const start = el.selectionStart;
+      const lineStart = el.value.lastIndexOf("\n", start - 1) + 1;
+      const prefix = el.value.slice(lineStart, start);
+      if (prefix && /^[\t ]+$/.test(prefix)) {
+        // Let the browser replace the indentation together with the selection.
+        // Keeping the value untouched preserves native input events and undo.
+        el.setSelectionRange(lineStart, el.selectionEnd, el.selectionDirection);
+      }
+    }
+
+    function insertEditor(route, text, { cleanIndent = false } = {}) {
       if (!writable(route)) return false;
       const { editor, type } = route;
       if (type === "codemirror") {
         editor.operation(() => {
           const ranges = editor.listSelections();
-          const clean = ranges.map(range => {
-            const a = range.anchor, h = range.head;
+          // Expanding multiple ranges can merge cursors or create overlapping
+          // edits. Preserve their original boundaries, including for cuts.
+          if (cleanIndent && ranges.length === 1) {
+            const { anchor: a, head: h } = ranges[0];
             const start = a.line < h.line || (a.line === h.line && a.ch <= h.ch) ? a : h;
             const end = start === a ? h : a;
             const prefix = editor.getLine(start.line).slice(0, start.ch);
-            return {
-              anchor: prefix && /^[\t ]+$/.test(prefix) ? { line: start.line, ch: 0 } : start,
-              head: end
-            };
-          });
-          editor.setSelections(clean);
-          editor.replaceSelections(clean.map(() => text), "end", "+input");
+            if (prefix && /^[\t ]+$/.test(prefix)) {
+              editor.setSelection({ line: start.line, ch: 0 }, end);
+            }
+          }
+          editor.replaceSelections(ranges.map(() => text), "end", "+input");
         });
       } else if (type === "monaco") {
         const model = editor.getModel();
@@ -317,7 +330,9 @@
             endColumn: selection.endColumn
           };
           const prefix = model.getLineContent(range.startLineNumber).slice(0, range.startColumn - 1);
-          if (prefix && /^[\t ]+$/.test(prefix)) range.startColumn = 1;
+          if (cleanIndent && selections.length === 1 && prefix && /^[\t ]+$/.test(prefix)) {
+            range.startColumn = 1;
+          }
           return { range, text, forceMoveMarkers: true };
         });
         editor.pushUndoStop();
@@ -395,6 +410,7 @@
         const route = routeFor(event.target, win);
         if (route.type === "unresolved") return;
         if (route.type === "native") {
+          if (getClipboardTextFromEvent(event)) prepareNativePaste(route.el);
           stopPageHandlers(event);
           lastRoute = "native";
           return;
@@ -402,7 +418,7 @@
         const text = getClipboardTextFromEvent(event);
         if (!text || !writable(route)) return;
         try {
-          if (insertEditor(route, text)) {
+          if (insertEditor(route, text, { cleanIndent: true })) {
             event.preventDefault();
             stopPageHandlers(event);
           }
